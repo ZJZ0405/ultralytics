@@ -973,6 +973,189 @@ class PoseLoss26(v8PoseLoss):
         return kpts_loss, kpts_obj_loss, rle_loss
 
 
+class ArmorPoseLoss(v8PoseLoss):
+    """Criterion class for computing training losses for ArmorPose pose estimation.
+
+    Extends v8PoseLoss with two additional per-anchor attribute classification losses:
+    - Color classification loss (cross-entropy on foreground anchors)
+    - Label classification loss (cross-entropy on foreground anchors)
+
+    Armor plate corners are treated with uniform keypoint sigmas since all four
+    corners are equally critical for accurate armor plate localization.
+
+    Attributes:
+        kpt_shape (tuple): Keypoint shape from the model's head.
+        nc_color (int): Number of armor color classes.
+        nc_label (int): Number of armor label classes.
+        keypoint_loss (KeypointLoss): Keypoint position loss with armor-appropriate sigmas.
+        bce_pose (nn.BCEWithLogitsLoss): Binary loss for keypoint visibility.
+        color_ce (nn.CrossEntropyLoss): Cross-entropy loss for color classification.
+        label_ce (nn.CrossEntropyLoss): Cross-entropy loss for label classification.
+
+    Methods:
+        loss: Compute total loss (7 components) with color/label losses.
+        kpts_decode: Decode keypoints in loss space matching ArmorPose.kpts_decode.
+        calculate_keypoints_loss: Armor-specific keypoint loss calculation.
+    """
+
+    def __init__(self, model: torch.nn.Module, tal_topk: int = 10, tal_topk2: int = 10):
+        """Initialize ArmorPoseLoss with uniform keypoint sigmas and color/label losses.
+
+        Args:
+            model (torch.nn.Module): The model (must be de-paralleled).
+            tal_topk (int): Top-k for TaskAlignedAssigner.
+            tal_topk2 (int): Second top-k for TaskAlignedAssigner.
+        """
+        super().__init__(model, tal_topk, tal_topk2)
+        # Override sigmas: armor corners are equally important → uniform sigmas
+        nkpt = self.kpt_shape[0]
+        self.keypoint_loss = KeypointLoss(sigmas=torch.ones(nkpt, device=self.device) / nkpt)
+        # Color and label classification heads
+        head = model.model[-1]
+        self.nc_color = head.nc_color
+        self.nc_label = head.nc_label
+        self.color_ce = nn.CrossEntropyLoss(reduction="none")
+        self.label_ce = nn.CrossEntropyLoss(reduction="none")
+
+    @staticmethod
+    def kpts_decode(anchor_points: torch.Tensor, pred_kpts: torch.Tensor) -> torch.Tensor:
+        """Decode predicted keypoints to image coordinates, matching ArmorPose.kpts_decode.
+
+        This static decode is used in the loss computation path and MUST produce
+        the same coordinate transformation as ArmorPose.kpts_decode (training path).
+
+        Args:
+            anchor_points (torch.Tensor): Anchor point coordinates, shape (N_anchors, 2).
+            pred_kpts (torch.Tensor): Predicted keypoints, shape (BS, N_anchors, *kpt_shape).
+
+        Returns:
+            (torch.Tensor): Decoded keypoints in image coordinates.
+        """
+        y = pred_kpts.clone()
+        y[..., :2] *= 2.0
+        y[..., 0] += anchor_points[:, [0]] - 0.5
+        y[..., 1] += anchor_points[:, [1]] - 0.5
+        return y
+
+    def loss(self, preds: dict[str, torch.Tensor], batch: dict[str, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
+        """Calculate the total loss for armor pose estimation with color/label losses.
+
+        Loss components: [box, kpt_location, kpt_visibility, cls, dfl, color, label]
+
+        Args:
+            preds (dict): Model predictions dict with keys 'kpts', 'color', 'label', etc.
+            batch (dict): Batch data dict with keys 'keypoints', 'color', 'label', etc.
+
+        Returns:
+            (tuple): (loss, loss.detach()) where loss has 7 components.
+        """
+        pred_kpts = preds["kpts"].permute(0, 2, 1).contiguous()
+        loss = torch.zeros(7, device=self.device)  # box, kpt_loc, kpt_vis, cls, dfl, color, label
+        (fg_mask, target_gt_idx, target_bboxes, anchor_points, stride_tensor), det_loss, _ = (
+            self.get_assigned_targets_and_loss(preds, batch)
+        )
+        loss[0], loss[3], loss[4] = det_loss[0], det_loss[1], det_loss[2]
+
+        batch_size = pred_kpts.shape[0]
+        imgsz = torch.tensor(preds["feats"][0].shape[2:], device=self.device, dtype=pred_kpts.dtype) * self.stride[0]
+
+        # Pboxes
+        pred_kpts = self.kpts_decode(anchor_points, pred_kpts.view(batch_size, -1, *self.kpt_shape))  # (b, h*w, 17, 3)
+
+        # Keypoint loss
+        if fg_mask.sum():
+            keypoints = batch["keypoints"].to(self.device).float().clone()
+            keypoints[..., 0] *= imgsz[1]
+            keypoints[..., 1] *= imgsz[0]
+
+            loss[1], loss[2] = self.calculate_keypoints_loss(
+                fg_mask, target_gt_idx, keypoints, batch["batch_idx"].view(-1, 1),
+                stride_tensor, target_bboxes, pred_kpts,
+            )
+
+            # Color classification loss (on foreground anchors)
+            if "color" in preds and "color" in batch:
+                color_pred = preds["color"].permute(0, 2, 1)[fg_mask]  # (N_fg, nc_color)
+                target_color = self._gather_target_attr(batch["color"], batch["batch_idx"], fg_mask, target_gt_idx)
+                loss[5] = self.color_ce(color_pred, target_color).mean()
+
+            # Label classification loss (on foreground anchors)
+            if "label" in preds and "label" in batch:
+                label_pred = preds["label"].permute(0, 2, 1)[fg_mask]  # (N_fg, nc_label)
+                target_label = self._gather_target_attr(batch["label"], batch["batch_idx"], fg_mask, target_gt_idx)
+                loss[6] = self.label_ce(label_pred, target_label).mean()
+
+        loss[1] *= self.hyp.pose  # pose gain
+        loss[2] *= self.hyp.kobj  # kobj gain
+        loss[5] *= self.hyp.color  # color loss gain
+        loss[6] *= self.hyp.label  # label loss gain
+
+        return loss * batch_size, loss.detach()  # loss(box, pose, kobj, cls, dfl, color, label)
+
+    @staticmethod
+    def _gather_target_attr(
+        attr: torch.Tensor, batch_idx: torch.Tensor, fg_mask: torch.Tensor, target_gt_idx: torch.Tensor
+    ) -> torch.Tensor:
+        """Gather target attribute values for foreground anchors using vectorized indexing.
+
+        Args:
+            attr (torch.Tensor): Per-box attribute tensor, shape (N_boxes,).
+            batch_idx (torch.Tensor): Batch index for each box, shape (N_boxes, 1).
+            fg_mask (torch.Tensor): Foreground mask, shape (BS, N_anchors).
+            target_gt_idx (torch.Tensor): GT index per anchor, shape (BS, N_anchors) or (BS, N_anchors, 1).
+
+        Returns:
+            (torch.Tensor): Target attribute values for foreground anchors, shape (N_fg,).
+        """
+        bs = fg_mask.shape[0]
+        batch_idx_flat = batch_idx.flatten().long()  # (N_boxes,)
+        target_gt_idx = target_gt_idx.squeeze(-1).long()  # (BS, N_anchors)
+
+        # Build batched attribute tensor (BS, max_boxes_per_image)
+        max_boxes = torch.unique(batch_idx_flat, return_counts=True)[1].max()
+        batched_attr = torch.zeros(bs, max_boxes, dtype=attr.dtype, device=attr.device)
+        offsets = torch.zeros(bs + 1, dtype=torch.long, device=attr.device)
+        offsets.scatter_add_(0, batch_idx_flat + 1, torch.ones_like(batch_idx_flat))
+        offsets = offsets.cumsum(0)
+        within_idx = torch.arange(len(batch_idx_flat), device=attr.device) - offsets[batch_idx_flat]
+        batched_attr[batch_idx_flat, within_idx] = attr
+
+        # Gather using target_gt_idx for each anchor
+        target_attr = batched_attr.gather(1, target_gt_idx.clamp(0, max_boxes - 1))
+        return target_attr[fg_mask].long()
+
+    def calculate_keypoints_loss(
+        self,
+        masks: torch.Tensor,
+        target_gt_idx: torch.Tensor,
+        keypoints: torch.Tensor,
+        batch_idx: torch.Tensor,
+        stride_tensor: torch.Tensor,
+        target_bboxes: torch.Tensor,
+        pred_kpts: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Calculate armor-specific keypoint loss.
+
+        Uses the standard calculation flow from v8PoseLoss with the overridden
+        uniform keypoint sigmas.
+
+        Args:
+            masks (torch.Tensor): Foreground mask, shape (BS, N_anchors).
+            target_gt_idx (torch.Tensor): Ground truth index for each anchor.
+            keypoints (torch.Tensor): Ground truth keypoints.
+            batch_idx (torch.Tensor): Batch index.
+            stride_tensor (torch.Tensor): Stride values.
+            target_bboxes (torch.Tensor): Ground truth bounding boxes.
+            pred_kpts (torch.Tensor): Predicted keypoints.
+
+        Returns:
+            (tuple): (kpts_loss, kpts_obj_loss).
+        """
+        return super().calculate_keypoints_loss(
+            masks, target_gt_idx, keypoints, batch_idx, stride_tensor, target_bboxes, pred_kpts
+        )
+
+
 class v8ClassificationLoss:
     """Criterion class for computing training losses for classification."""
 

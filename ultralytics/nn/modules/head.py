@@ -21,6 +21,7 @@ from .transformer import MLP, DeformableTransformerDecoder, DeformableTransforme
 from .utils import bias_init_with_prob, linear_init
 
 __all__ = (
+    "ArmorPose",
     "OBB",
     "Classify",
     "Detect",
@@ -777,6 +778,208 @@ class Pose26(Pose):
                     y[:, 2::ndim] = y[:, 2::ndim].sigmoid()
             y[:, 0::ndim] = (y[:, 0::ndim] + self.anchors[0]) * self.strides
             y[:, 1::ndim] = (y[:, 1::ndim] + self.anchors[1]) * self.strides
+            return y
+
+
+class ArmorPose(Pose):
+    """ArmorPose head for armor plate keypoint detection with color and label classification.
+
+    This class extends the Pose head with two additional per-anchor attribute classifiers:
+    - cv5: color classifier (nc_color classes)
+    - cv6: label classifier (nc_label classes)
+
+    Together these enable joint keypoint estimation, color recognition, and label
+    classification for armor plates in robotic applications.
+
+    Attributes:
+        kpt_shape (tuple): Number of keypoints and dimensions (2 for x,y or 3 for x,y,visible).
+        nk (int): Total number of keypoint values.
+        nc_color (int): Number of armor color classes.
+        nc_label (int): Number of armor label classes.
+        cv4 (nn.ModuleList): Convolution layers for keypoint prediction.
+        cv5 (nn.ModuleList): Convolution layers for color classification.
+        cv6 (nn.ModuleList): Convolution layers for label classification.
+
+    Methods:
+        forward_head: Returns boxes, scores, kpts, color, label.
+        kpts_decode: Armor-specific keypoint decoding from predictions.
+        _inference: Decode boxes, scores, kpts, color, label for inference.
+        postprocess: Armor-specific post-processing including color/label.
+        fuse: Remove one2many heads for inference optimization.
+
+    Examples:
+        Create an ArmorPose detection head
+        >>> armor_pose = ArmorPose(nc=16, kpt_shape=(4, 3), nc_color=8, nc_label=10, ch=(256, 512, 1024))
+        >>> x = [torch.randn(1, 256, 80, 80), torch.randn(1, 512, 40, 40), torch.randn(1, 1024, 20, 20)]
+        >>> outputs = armor_pose(x)
+    """
+
+    def __init__(
+        self,
+        nc: int = 16,
+        kpt_shape: tuple = (4, 3),
+        nc_color: int = 8,
+        nc_label: int = 10,
+        reg_max=16,
+        end2end=False,
+        ch: tuple = (),
+    ):
+        """Initialize ArmorPose head with armor-specific defaults and color/label classifiers.
+
+        Args:
+            nc (int): Number of detection classes (default 16 for armor plates).
+            kpt_shape (tuple): Number of keypoints, number of dims (default [4, 3] for armor corners).
+            nc_color (int): Number of armor color classes.
+            nc_label (int): Number of armor label classes.
+            reg_max (int): Maximum number of DFL channels.
+            end2end (bool): Whether to use end-to-end NMS-free detection.
+            ch (tuple): Tuple of channel sizes from backbone feature maps.
+        """
+        super().__init__(nc, kpt_shape, reg_max, end2end, ch)
+        self.nc_color = nc_color
+        self.nc_label = nc_label
+
+        c4 = max(ch[0] // 4, self.nk)
+        self.cv5 = nn.ModuleList(
+            nn.Sequential(Conv(x, c4, 3), Conv(c4, c4, 3), nn.Conv2d(c4, nc_color, 1)) for x in ch
+        )
+        self.cv6 = nn.ModuleList(
+            nn.Sequential(Conv(x, c4, 3), Conv(c4, c4, 3), nn.Conv2d(c4, nc_label, 1)) for x in ch
+        )
+        if end2end:
+            self.one2one_cv5 = copy.deepcopy(self.cv5)
+            self.one2one_cv6 = copy.deepcopy(self.cv6)
+
+    @property
+    def one2many(self):
+        """Returns the one-to-many head components including color and label heads."""
+        return dict(
+            box_head=self.cv2,
+            cls_head=self.cv3,
+            pose_head=self.cv4,
+            color_head=self.cv5,
+            label_head=self.cv6,
+        )
+
+    @property
+    def one2one(self):
+        """Returns the one-to-one head components including color and label heads."""
+        return dict(
+            box_head=self.one2one_cv2,
+            cls_head=self.one2one_cv3,
+            pose_head=self.one2one_cv4,
+            color_head=self.one2one_cv5,
+            label_head=self.one2one_cv6,
+        )
+
+    def forward_head(
+        self,
+        x: list[torch.Tensor],
+        box_head: torch.nn.Module,
+        cls_head: torch.nn.Module,
+        pose_head: torch.nn.Module,
+        color_head: torch.nn.Module = None,
+        label_head: torch.nn.Module = None,
+    ) -> dict[str, torch.Tensor]:
+        """Concatenates and returns predicted boxes, scores, keypoints, color, and label.
+
+        Args:
+            x (list[torch.Tensor]): Feature maps from FPN at each scale.
+            box_head (nn.Module): Box regression head.
+            cls_head (nn.Module): Class score head.
+            pose_head (nn.Module): Keypoint prediction head.
+            color_head (nn.Module): Color classification head.
+            label_head (nn.Module): Label classification head.
+
+        Returns:
+            (dict[str, torch.Tensor]): Predictions with keys 'boxes', 'scores', 'kpts',
+                'color', 'label', and 'feats'.
+        """
+        preds = super().forward_head(x, box_head, cls_head, pose_head)
+        if color_head is not None:
+            bs = x[0].shape[0]  # batch size
+            preds["color"] = torch.cat(
+                [color_head[i](x[i]).view(bs, self.nc_color, -1) for i in range(self.nl)], 2
+            )
+        if label_head is not None:
+            bs = x[0].shape[0]  # batch size
+            preds["label"] = torch.cat(
+                [label_head[i](x[i]).view(bs, self.nc_label, -1) for i in range(self.nl)], 2
+            )
+        return preds
+
+    def _inference(self, x: dict[str, torch.Tensor]) -> torch.Tensor:
+        """Decode boxes, scores, keypoints, color, and label for inference.
+
+        Args:
+            x (dict): Dictionary containing 'boxes', 'scores', 'kpts', 'color', 'label', and 'feats'.
+
+        Returns:
+            (torch.Tensor): Concatenated [boxes, scores, decoded_kpts, color, label] tensor.
+        """
+        preds = super()._inference(x)  # boxes + scores + decoded kpts
+        parts = [preds]
+        if "color" in x:
+            parts.append(x["color"].sigmoid())
+        if "label" in x:
+            parts.append(x["label"].sigmoid())
+        return torch.cat(parts, dim=1)
+
+    def postprocess(self, preds: torch.Tensor) -> torch.Tensor:
+        """Armor-specific post-processing including color and label predictions.
+
+        Args:
+            preds (torch.Tensor): Raw predictions tensor with shape
+                (batch_size, num_anchors, 4 + nc + nk + nc_color + nc_label).
+
+        Returns:
+            (torch.Tensor): Processed predictions with format
+                [x1, y1, x2, y2, max_class_prob, class_index, keypoints, color, label].
+        """
+        boxes, scores, kpts, color, label = preds.split(
+            [4, self.nc, self.nk, self.nc_color, self.nc_label], dim=-1
+        )
+        scores, conf, idx = self.get_topk_index(scores, self.max_det)
+        boxes = boxes.gather(dim=1, index=idx.repeat(1, 1, 4))
+        kpts = kpts.gather(dim=1, index=idx.repeat(1, 1, self.nk))
+        color = color.gather(dim=1, index=idx.repeat(1, 1, self.nc_color))
+        label = label.gather(dim=1, index=idx.repeat(1, 1, self.nc_label))
+        return torch.cat([boxes, scores, conf, kpts, color, label], dim=-1)
+
+    def fuse(self) -> None:
+        """Remove the one2many head for inference optimization."""
+        super().fuse()
+        self.cv5 = self.cv6 = None
+
+    def kpts_decode(self, kpts: torch.Tensor) -> torch.Tensor:
+        """Decode keypoints with armor-specific coordinate formula.
+
+        Overrides Pose.kpts_decode. The armor decoding uses the same base formula
+        as Pose but can be customized for armor-specific coordinate transformations.
+
+        Args:
+            kpts (torch.Tensor): Raw keypoint predictions.
+
+        Returns:
+            (torch.Tensor): Decoded keypoint coordinates.
+        """
+        ndim = self.kpt_shape[1]
+        bs = kpts.shape[0]
+        if self.export:
+            y = kpts.view(bs, *self.kpt_shape, -1)
+            a = (y[:, :, :2] * 2.0 + (self.anchors - 0.5)) * self.strides
+            if ndim == 3:
+                a = torch.cat((a, y[:, :, 2:3].sigmoid()), 2)
+            return a.view(bs, self.nk, -1)
+        else:
+            y = kpts.clone()
+            if ndim == 3:
+                if NOT_MACOS14:
+                    y[:, 2::ndim].sigmoid_()
+                else:  # Apple macOS14 MPS bug https://github.com/ultralytics/ultralytics/pull/21878
+                    y[:, 2::ndim] = y[:, 2::ndim].sigmoid()
+            y[:, 0::ndim] = (y[:, 0::ndim] * 2.0 + (self.anchors[0] - 0.5)) * self.strides
+            y[:, 1::ndim] = (y[:, 1::ndim] * 2.0 + (self.anchors[1] - 0.5)) * self.strides
             return y
 
 

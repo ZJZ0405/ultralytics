@@ -108,8 +108,8 @@ class PoseValidator(DetectionValidator):
         """Postprocess YOLO predictions to extract and reshape keypoints for pose estimation.
 
         This method extends the parent class postprocessing by extracting keypoints from the 'extra' field of
-        predictions and reshaping them according to the keypoint shape configuration. The keypoints are reshaped from a
-        flattened format to the proper dimensional structure (typically [N, 17, 3] for COCO pose format).
+        predictions and reshaping them according to the keypoint shape configuration. For ArmorPose models,
+        color and label attributes are also extracted from the extra field.
 
         Args:
             preds (torch.Tensor): Raw prediction tensor from the YOLO pose model containing bounding boxes, confidence
@@ -121,15 +121,27 @@ class PoseValidator(DetectionValidator):
                 - 'conf': Confidence scores
                 - 'cls': Class predictions
                 - 'keypoints': Reshaped keypoint coordinates with shape (-1, *self.kpt_shape)
+                - 'color' (ArmorPose only): Color classification scores
+                - 'label' (ArmorPose only): Label classification scores
 
         Notes:
             If no keypoints are present in a prediction (empty keypoints), that prediction is skipped and continues
-            to the next one. The keypoints are extracted from the 'extra' field which contains additional
-            task-specific data beyond basic detection.
+            to the next one. For ArmorPose heads, the extra field also contains color and label predictions.
         """
         preds = super().postprocess(preds)
         for pred in preds:
-            pred["keypoints"] = pred.pop("extra").view(-1, *self.kpt_shape)  # remove extra if exists
+            extra = pred.pop("extra")
+            nk = self.kpt_shape[0] * self.kpt_shape[1]
+            pred["keypoints"] = extra[:, :nk].view(-1, *self.kpt_shape)
+            # Extract color and label for ArmorPose heads
+            head = getattr(self.model, "model", None)
+            if head is not None:
+                head = head[-1]
+            if head is not None and hasattr(head, "nc_color"):
+                nc_color = head.nc_color
+                nc_label = head.nc_label
+                pred["color"] = extra[:, nk : nk + nc_color]
+                pred["label"] = extra[:, nk + nc_color : nk + nc_color + nc_label]
         return preds
 
     def _prepare_batch(self, si: int, batch: dict[str, Any]) -> dict[str, Any]:

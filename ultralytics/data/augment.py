@@ -2340,6 +2340,12 @@ class Format(BaseTransform):
             if self.normalize:
                 labels["keypoints"][..., 0] /= w
                 labels["keypoints"][..., 1] /= h
+        # Per-instance color and label attributes (ArmorPose format)
+        if instances is not None:
+            if instances.color is not None:
+                labels["color"] = torch.from_numpy(instances.color).long().squeeze(-1)
+            if instances.label is not None:
+                labels["label"] = torch.from_numpy(instances.label).long().squeeze(-1)
         if self.return_obb:
             labels["bboxes"] = (
                 xyxyxyxy2xywhr(torch.from_numpy(instances.segments)) if len(instances.segments) else torch.zeros((0, 5))

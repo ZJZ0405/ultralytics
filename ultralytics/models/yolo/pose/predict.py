@@ -45,23 +45,36 @@ class PosePredictor(DetectionPredictor):
         """Construct the result object from the prediction, including keypoints.
 
         Extends the parent class implementation by extracting keypoint data from predictions and adding them to the
-        result object.
+        result object. For ArmorPose models, color and label attributes are also extracted.
 
         Args:
             pred (torch.Tensor): The predicted bounding boxes, scores, and keypoints with shape (N, 6+K*D) where N is
                 the number of detections, K is the number of keypoints, and D is the keypoint dimension.
+                For ArmorPose, additional color and label dimensions are included.
             img (torch.Tensor): The processed input image tensor with shape (B, C, H, W).
             orig_img (np.ndarray): The original unprocessed image as a numpy array.
             img_path (str): The path to the original image file.
 
         Returns:
-            (Results): The result object containing the original image, image path, class names, bounding boxes, and
-                keypoints.
+            (Results): The result object containing the original image, image path, class names, bounding boxes,
+                keypoints, and optionally color/label predictions.
         """
         result = super().construct_result(pred, img, orig_img, img_path)
         # Extract keypoints from prediction and reshape according to model's keypoint shape
-        pred_kpts = pred[:, 6:].view(pred.shape[0], *self.model.kpt_shape)
+        nk = self.model.kpt_shape[0] * self.model.kpt_shape[1]
+        pred_kpts = pred[:, 6 : 6 + nk].view(pred.shape[0], *self.model.kpt_shape)
         # Scale keypoints coordinates to match the original image dimensions
         pred_kpts = ops.scale_coords(img.shape[2:], pred_kpts, orig_img.shape)
         result.update(keypoints=pred_kpts)
+        # Extract color and label for ArmorPose models
+        head = getattr(self.model, "model", None)
+        if head is not None:
+            head = head[-1]
+        if head is not None and hasattr(head, "nc_color"):
+            nc_color = head.nc_color
+            nc_label = head.nc_label
+            result.update(
+                color=pred[:, 6 + nk : 6 + nk + nc_color],
+                label=pred[:, 6 + nk + nc_color : 6 + nk + nc_color + nc_label],
+            )
         return result

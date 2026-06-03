@@ -124,7 +124,7 @@ class YOLODataset(BaseDataset):
                 ),
             )
             pbar = TQDM(results, desc=desc, total=total)
-            for im_file, lb, shape, segments, keypoint, nm_f, nf_f, ne_f, nc_f, msg in pbar:
+            for im_file, lb, shape, segments, keypoint, color, label, nm_f, nf_f, ne_f, nc_f, msg in pbar:
                 nm += nm_f
                 nf += nf_f
                 ne += ne_f
@@ -138,6 +138,8 @@ class YOLODataset(BaseDataset):
                             "bboxes": lb[:, 1:],  # n, 4
                             "segments": segments,
                             "keypoints": keypoint,
+                            "color": color,  # n, 1 or None
+                            "label": label,  # n, 1 or None
                             "normalized": True,
                             "bbox_format": "xywh",
                         }
@@ -265,6 +267,8 @@ class YOLODataset(BaseDataset):
         bboxes = label.pop("bboxes")
         segments = label.pop("segments", [])
         keypoints = label.pop("keypoints", None)
+        color = label.pop("color", None)
+        label_attr = label.pop("label", None)
         bbox_format = label.pop("bbox_format")
         normalized = label.pop("normalized")
 
@@ -278,7 +282,10 @@ class YOLODataset(BaseDataset):
             segments = np.stack(resample_segments(segments, n=segment_resamples), axis=0)
         else:
             segments = np.zeros((0, segment_resamples, 2), dtype=np.float32)
-        label["instances"] = Instances(bboxes, segments, keypoints, bbox_format=bbox_format, normalized=normalized)
+        label["instances"] = Instances(
+            bboxes, segments, keypoints, bbox_format=bbox_format, normalized=normalized,
+            color=color, label=label_attr,
+        )
         return label
 
     @staticmethod
@@ -301,7 +308,7 @@ class YOLODataset(BaseDataset):
                 value = torch.stack(value, 0)
             elif k == "visuals":
                 value = torch.nn.utils.rnn.pad_sequence(value, batch_first=True)
-            if k in {"masks", "keypoints", "bboxes", "cls", "segments", "obb"}:
+            if k in {"masks", "keypoints", "bboxes", "cls", "segments", "obb", "color", "label"}:
                 value = torch.cat(value, 0)
             new_batch[k] = value
         if "batch_idx" in new_batch:

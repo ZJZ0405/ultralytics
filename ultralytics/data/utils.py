@@ -246,7 +246,7 @@ def verify_image_label(args: tuple) -> list:
     """Verify one image-label pair."""
     im_file, lb_file, prefix, keypoint, num_cls, nkpt, ndim, single_cls = args
     # Number (missing, found, empty, corrupt), message, segments, keypoints
-    nm, nf, ne, nc, msg, segments, keypoints = 0, 0, 0, 0, "", [], None
+    nm, nf, ne, nc, msg, segments, keypoints, color, label = 0, 0, 0, 0, "", [], None, None, None
     try:
         # Verify images
         msg, shape = check_image(im_file)
@@ -264,8 +264,11 @@ def verify_image_label(args: tuple) -> list:
                 lb = np.array(lb, dtype=np.float32)
             if nl := len(lb):
                 if keypoint:
-                    assert lb.shape[1] == (5 + nkpt * ndim), f"labels require {(5 + nkpt * ndim)} columns each"
-                    points = lb[:, 5:].reshape(-1, ndim)[:, :2]
+                    assert lb.shape[1] >= (5 + nkpt * ndim), (
+                        f"labels require at least {(5 + nkpt * ndim)} columns, "
+                        f"{int(lb.shape[1])} columns detected"
+                    )
+                    points = lb[:, 5 : 5 + nkpt * ndim].reshape(-1, ndim)[:, :2]
                 else:
                     assert lb.shape[1] == 5, f"labels require 5 columns, {lb.shape[1]} columns detected"
                     points = lb[:, 1:]
@@ -292,16 +295,22 @@ def verify_image_label(args: tuple) -> list:
             nm = 1  # label missing
             lb = np.zeros((0, (5 + nkpt * ndim) if keypoint else 5), dtype=np.float32)
         if keypoint:
-            keypoints = lb[:, 5:].reshape(-1, nkpt, ndim)
+            kpt_cols = 5 + nkpt * ndim
+            keypoints = lb[:, 5:kpt_cols].reshape(-1, nkpt, ndim)
             if ndim == 2:
                 kpt_mask = np.where((keypoints[..., 0] < 0) | (keypoints[..., 1] < 0), 0.0, 1.0).astype(np.float32)
                 keypoints = np.concatenate([keypoints, kpt_mask[..., None]], axis=-1)  # (nl, nkpt, 3)
+            # Extract per-box color and label attributes from extra columns (ArmorPose format)
+            extra_cols = int(lb.shape[1]) - kpt_cols
+            if extra_cols >= 2:
+                color = lb[:, kpt_cols : kpt_cols + 1]  # (nl, 1)
+                label = lb[:, kpt_cols + 1 : kpt_cols + 2]  # (nl, 1)
         lb = lb[:, :5]
-        return im_file, lb, shape, segments, keypoints, nm, nf, ne, nc, msg
+        return im_file, lb, shape, segments, keypoints, color, label, nm, nf, ne, nc, msg
     except Exception as e:
         nc = 1
         msg = f"{prefix}{im_file}: ignoring corrupt image/label: {e}"
-        return [None, None, None, None, None, nm, nf, ne, nc, msg]
+        return [None, None, None, None, None, None, None, nm, nf, ne, nc, msg]
 
 
 def visualize_image_annotations(image_path: str, txt_path: str, label_map: dict[int, str]):

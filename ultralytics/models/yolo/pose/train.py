@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from ultralytics.models import yolo
+from ultralytics.nn.modules import ArmorPose
 from ultralytics.nn.tasks import PoseModel
 from ultralytics.utils import DEFAULT_CFG, RANK
 from ultralytics.utils.torch_utils import unwrap_model
@@ -98,6 +99,8 @@ class PoseTrainer(yolo.detect.DetectionTrainer):
         self.loss_names = "box_loss", "pose_loss", "kobj_loss", "cls_loss", "dfl_loss"
         if getattr(unwrap_model(self.model).model[-1], "flow_model", None) is not None:
             self.loss_names += ("rle_loss",)
+        if isinstance(unwrap_model(self.model).model[-1], ArmorPose):
+            self.loss_names += ("color_loss", "label_loss")
         return yolo.pose.PoseValidator(
             self.test_loader, save_dir=self.save_dir, args=copy(self.args), _callbacks=self.callbacks
         )

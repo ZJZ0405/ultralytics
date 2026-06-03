@@ -220,6 +220,8 @@ class Instances:
         keypoints: np.ndarray = None,
         bbox_format: str = "xywh",
         normalized: bool = True,
+        color: np.ndarray = None,
+        label: np.ndarray = None,
     ) -> None:
         """Initialize the Instances object with bounding boxes, segments, and keypoints.
 
@@ -229,11 +231,15 @@ class Instances:
             keypoints (np.ndarray, optional): Keypoints with shape (N, 17, 3) in format (x, y, visible).
             bbox_format (str): Format of bboxes.
             normalized (bool): Whether the coordinates are normalized.
+            color (np.ndarray, optional): Per-instance color class indices with shape (N, 1) or (N,).
+            label (np.ndarray, optional): Per-instance label class indices with shape (N, 1) or (N,).
         """
         self._bboxes = Bboxes(bboxes=bboxes, format=bbox_format)
         self.keypoints = keypoints
         self.normalized = normalized
         self.segments = segments
+        self.color = color
+        self.label = label
 
     def convert_bbox(self, format: str) -> None:
         """Convert bounding box format.
@@ -329,6 +335,8 @@ class Instances:
         """
         segments = self.segments[index] if len(self.segments) else self.segments
         keypoints = self.keypoints[index] if self.keypoints is not None else None
+        color = self.color[index] if self.color is not None else None
+        label = self.label[index] if self.label is not None else None
         bboxes = self.bboxes[index]
         bbox_format = self._bboxes.format
         return Instances(
@@ -337,6 +345,8 @@ class Instances:
             keypoints=keypoints,
             bbox_format=bbox_format,
             normalized=self.normalized,
+            color=color,
+            label=label,
         )
 
     def flipud(self, h: int) -> None:
@@ -412,21 +422,38 @@ class Instances:
                 self.segments = self.segments[good]
             if self.keypoints is not None:
                 self.keypoints = self.keypoints[good]
+            if self.color is not None:
+                self.color = self.color[good]
+            if self.label is not None:
+                self.label = self.label[good]
         return good
 
-    def update(self, bboxes: np.ndarray, segments: np.ndarray = None, keypoints: np.ndarray = None):
+    def update(
+        self,
+        bboxes: np.ndarray,
+        segments: np.ndarray = None,
+        keypoints: np.ndarray = None,
+        color: np.ndarray = None,
+        label: np.ndarray = None,
+    ):
         """Update instance variables.
 
         Args:
             bboxes (np.ndarray): New bounding boxes.
             segments (np.ndarray, optional): New segments.
             keypoints (np.ndarray, optional): New keypoints.
+            color (np.ndarray, optional): New per-instance color class indices.
+            label (np.ndarray, optional): New per-instance label class indices.
         """
         self._bboxes = Bboxes(bboxes, format=self._bboxes.format)
         if segments is not None:
             self.segments = segments
         if keypoints is not None:
             self.keypoints = keypoints
+        if color is not None:
+            self.color = color
+        if label is not None:
+            self.label = label
 
     def __len__(self) -> int:
         """Return the number of instances."""
@@ -457,6 +484,8 @@ class Instances:
             return instances_list[0]
 
         use_keypoint = instances_list[0].keypoints is not None
+        use_color = instances_list[0].color is not None
+        use_label = instances_list[0].label is not None
         bbox_format = instances_list[0]._bboxes.format
         normalized = instances_list[0].normalized
 
@@ -476,7 +505,9 @@ class Instances:
         else:
             cat_segments = np.concatenate([b.segments for b in instances_list], axis=axis)
         cat_keypoints = np.concatenate([b.keypoints for b in instances_list], axis=axis) if use_keypoint else None
-        return cls(cat_boxes, cat_segments, cat_keypoints, bbox_format, normalized)
+        cat_color = np.concatenate([b.color for b in instances_list], axis=axis) if use_color else None
+        cat_label = np.concatenate([b.label for b in instances_list], axis=axis) if use_label else None
+        return cls(cat_boxes, cat_segments, cat_keypoints, bbox_format, normalized, color=cat_color, label=cat_label)
 
     @property
     def bboxes(self) -> np.ndarray:

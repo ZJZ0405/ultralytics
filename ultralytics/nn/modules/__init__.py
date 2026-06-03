@@ -79,6 +79,7 @@ from .conv import (
 from .head import (
     OBB,
     OBB26,
+    ArmorPose,
     Classify,
     Detect,
     LRPCHead,
@@ -109,6 +110,7 @@ from .transformer import (
 
 __all__ = (
     "AIFI",
+    "ArmorPose",
     "C1",
     "C2",
     "C2PSA",
