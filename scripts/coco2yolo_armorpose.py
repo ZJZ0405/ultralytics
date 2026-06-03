@@ -27,7 +27,6 @@ Usage:
 import argparse
 import json
 import shutil
-import sys
 from collections import defaultdict
 from pathlib import Path
 
@@ -119,11 +118,13 @@ def convert_coco_armorpose(
 
     nk = kpt_shape[0] * kpt_shape[1]  # total keypoint values (e.g., 4*3=12)
 
-    # --- Collect all category names from all JSONs ---
+    # --- Collect all category names and cache JSON data ---
     all_category_names: dict[int, str] = {}
+    json_data_cache: list[tuple[Path, dict]] = []  # (json_path, data)
     for jf in json_files:
         with open(jf, encoding="utf-8") as f:
             data = json.load(f)
+        json_data_cache.append((jf, data))
         for cat in data.get("categories", []):
             cat_id = int(cat["id"])
             if cat_id not in all_category_names:
@@ -135,9 +136,7 @@ def convert_coco_armorpose(
     class_names: dict[int, str] = {i: all_category_names[cid] for i, cid in enumerate(sorted_cat_ids)}
 
     # --- Process each JSON file ---
-    for jf in json_files:
-        with open(jf, encoding="utf-8") as f:
-            data = json.load(f)
+    for jf, data in json_data_cache:
 
         # Determine split name from filename
         stem_lower = jf.stem.lower()
@@ -218,7 +217,10 @@ def convert_coco_armorpose(
 
                 # --- Class ---
                 coco_cat_id = ann["category_id"]
-                cls = coco_id_to_cls.get(coco_cat_id, 0)
+                cls = coco_id_to_cls.get(coco_cat_id)
+                if cls is None:
+                    print(f"  [WARN] Unknown category_id {coco_cat_id} in annotation id={ann.get('id')}, using 0")
+                    cls = 0
 
                 # --- Keypoints ---
                 kpts_raw = ann.get("keypoints")
@@ -227,6 +229,13 @@ def convert_coco_armorpose(
                     continue
 
                 kpts_arr = np.array(kpts_raw, dtype=np.float64).reshape(-1, 3)
+                if kpts_arr.shape[0] != kpt_shape[0]:
+                    print(
+                        f"  [WARN] Expected {kpt_shape[0]} keypoints, got {kpts_arr.shape[0]} "
+                        f"in annotation id={ann.get('id')}, skipping"
+                    )
+                    skipped_no_kpt += 1
+                    continue
                 # Normalize x/w, y/h, keep visibility as-is
                 kpts_arr[:, 0] /= w
                 kpts_arr[:, 1] /= h
@@ -251,12 +260,12 @@ def convert_coco_armorpose(
             if lines:
                 txt_path = label_out / f"{Path(img_filename).stem}.txt"
                 with open(txt_path, "w", encoding="utf-8") as f:
+                    kpt_cols = 1 + 4 + nk  # class(1) + bbox(4) + keypoints(nk)
                     for line_vals in lines:
-                        # Format: use "%.6g" for floats, "%d" for integers
                         formatted = []
                         for i, val in enumerate(line_vals):
-                            if i == 0 or i == len(line_vals) - 2 or i == len(line_vals) - 1:
-                                # class_id (0), color_id (17), label_id (18) -> int
+                            if i == 0 or i == kpt_cols or i == kpt_cols + 1:
+                                # class_id, color_id, label_id → integer
                                 formatted.append(str(int(val)))
                             else:
                                 formatted.append(f"{float(val):.6g}")
