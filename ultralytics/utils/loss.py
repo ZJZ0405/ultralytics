@@ -1109,6 +1109,7 @@ class ArmorPoseLoss(v8PoseLoss):
         """
         bs = fg_mask.shape[0]
         batch_idx_flat = batch_idx.flatten().long()  # (N_boxes,)
+        assert batch_idx_flat.min() >= 0, f"Negative batch_idx values: {batch_idx_flat.min()}"
         target_gt_idx = target_gt_idx.squeeze(-1).long()  # (BS, N_anchors)
 
         # Build batched attribute tensor (BS, max_boxes_per_image)

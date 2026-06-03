@@ -920,9 +920,9 @@ class ArmorPose(Pose):
         preds = super()._inference(x)  # boxes + scores + decoded kpts
         parts = [preds]
         if "color" in x:
-            parts.append(x["color"].sigmoid())
+            parts.append(x["color"].softmax(1))
         if "label" in x:
-            parts.append(x["label"].sigmoid())
+            parts.append(x["label"].softmax(1))
         return torch.cat(parts, dim=1)
 
     def postprocess(self, preds: torch.Tensor) -> torch.Tensor:
@@ -951,36 +951,8 @@ class ArmorPose(Pose):
         super().fuse()
         self.cv5 = self.cv6 = None
 
-    def kpts_decode(self, kpts: torch.Tensor) -> torch.Tensor:
-        """Decode keypoints with armor-specific coordinate formula.
-
-        Overrides Pose.kpts_decode. The armor decoding uses the same base formula
-        as Pose but can be customized for armor-specific coordinate transformations.
-
-        Args:
-            kpts (torch.Tensor): Raw keypoint predictions.
-
-        Returns:
-            (torch.Tensor): Decoded keypoint coordinates.
-        """
-        ndim = self.kpt_shape[1]
-        bs = kpts.shape[0]
-        if self.export:
-            y = kpts.view(bs, *self.kpt_shape, -1)
-            a = (y[:, :, :2] * 2.0 + (self.anchors - 0.5)) * self.strides
-            if ndim == 3:
-                a = torch.cat((a, y[:, :, 2:3].sigmoid()), 2)
-            return a.view(bs, self.nk, -1)
-        else:
-            y = kpts.clone()
-            if ndim == 3:
-                if NOT_MACOS14:
-                    y[:, 2::ndim].sigmoid_()
-                else:  # Apple macOS14 MPS bug https://github.com/ultralytics/ultralytics/pull/21878
-                    y[:, 2::ndim] = y[:, 2::ndim].sigmoid()
-            y[:, 0::ndim] = (y[:, 0::ndim] * 2.0 + (self.anchors[0] - 0.5)) * self.strides
-            y[:, 1::ndim] = (y[:, 1::ndim] * 2.0 + (self.anchors[1] - 0.5)) * self.strides
-            return y
+    # NOTE: kpts_decode is inherited from Pose. Override here if armor-specific
+    # coordinate decoding is needed (e.g., different anchor offset formula).
 
 
 class Classify(nn.Module):
