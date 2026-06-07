@@ -25,6 +25,12 @@ BATCH   = 32
 DEVICE  = 0
 WORKERS = 4
 
+# ── 辅助 ────────────────────────────────────────────────────────────────
+def _inject_loss_names(trainer):
+    """注入 color_loss / type_loss 到训练日志，PoseTrainer 默认无此二项。"""
+    if "color_loss" not in trainer.loss_names:
+        trainer.loss_names += ("color_loss", "type_loss")
+
 # ── 主流程 ──────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="ArmorPose 训练")
@@ -62,17 +68,9 @@ if __name__ == "__main__":
     if hasattr(inner, "set_armor_loss"):
         inner.set_armor_loss()
 
-    # 往 loss_names 里注入 color_loss / type_loss（PoseTrainer 默认只有 5 项）
+    # 通过回调注入 color_loss / type_loss 到训练日志（PoseTrainer 默认只有 5 项）
     if hasattr(inner.model[-1], "color_head") and getattr(inner.model[-1], "color_head", None) is not None:
-        from ultralytics.models.yolo.pose import PoseTrainer
-        # monkey-patch: 让 PoseTrainer 初始化时带上 armor loss 名
-        _orig = PoseTrainer.get_validator
-        def _patched(self):
-            r = _orig(self)
-            if "color_loss" not in self.loss_names:
-                self.loss_names += ("color_loss", "type_loss")
-            return r
-        PoseTrainer.get_validator = _patched
+        model.add_callback("on_train_start", lambda t: _inject_loss_names(t))
 
     model.train(
         data=str(DATA_YAML),
