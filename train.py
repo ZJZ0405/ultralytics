@@ -83,7 +83,7 @@ if __name__ == "__main__":
         hsv_h=0.0,
         hsv_s=0.0,
         hsv_v=0.0,
-        degrees=180.0,
+        degrees=90.0,
         shear=10.0,
         scale=0.9,
         translate=0.2,
