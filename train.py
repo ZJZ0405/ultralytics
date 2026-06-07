@@ -25,12 +25,6 @@ BATCH   = 32
 DEVICE  = 0
 WORKERS = 4
 
-# ── 辅助 ────────────────────────────────────────────────────────────────
-def _inject_loss_names(trainer):
-    """注入 color_loss / type_loss 到训练日志，PoseTrainer 默认无此二项。"""
-    if "color_loss" not in trainer.loss_names:
-        trainer.loss_names += ("color_loss", "type_loss")
-
 # ── 主流程 ──────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="ArmorPose 训练")
@@ -59,18 +53,18 @@ if __name__ == "__main__":
     else:
         model = YOLO(MODEL_CFG)
 
-    # 强制使用 ArmorPoseModel + ArmorPoseLoss
-    from ultralytics.nn.tasks import ArmorPoseModel
-    from ultralytics.utils.torch_utils import unwrap_model
-    inner = unwrap_model(model.model)
-    if not isinstance(inner, ArmorPoseModel):
-        inner.__class__ = ArmorPoseModel
-    if hasattr(inner, "set_armor_loss"):
-        inner.set_armor_loss()
+    # 训练启动后替换为 ArmorPoseModel + ArmorPoseLoss，并注入 loss 名
+    def _setup_armor(trainer):
+        from ultralytics.nn.tasks import ArmorPoseModel
+        from ultralytics.utils.torch_utils import unwrap_model
+        m = unwrap_model(trainer.model)
+        if not isinstance(m, ArmorPoseModel):
+            m.__class__ = ArmorPoseModel
+        m.set_armor_loss()
+        if "color_loss" not in trainer.loss_names:
+            trainer.loss_names += ("color_loss", "type_loss")
 
-    # 通过回调注入 color_loss / type_loss 到训练日志（PoseTrainer 默认只有 5 项）
-    if hasattr(inner.model[-1], "color_head") and getattr(inner.model[-1], "color_head", None) is not None:
-        model.add_callback("on_train_start", lambda t: _inject_loss_names(t))
+    model.add_callback("on_pretrain_routine_start", _setup_armor)
 
     model.train(
         data=str(DATA_YAML),
