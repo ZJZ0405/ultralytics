@@ -737,20 +737,14 @@ class ArmorPoseModel(PoseModel):
     def init_criterion(self):
         """Initialize the loss criterion for ArmorPose.
 
-        Falls back to v8PoseLoss by default (compatible with standard pose task).
-        Call model.set_armor_loss() to enable armor-specific color/type losses.
+        Always returns ArmorPoseLoss with dual color/type classification branches.
 
         Returns:
-            (v8PoseLoss | E2ELoss): The loss criterion.
+            (ArmorPoseLoss | E2ELoss): The loss criterion.
         """
         if getattr(self, "end2end", False):
-            return E2ELoss(self, PoseLoss26)
-        return v8PoseLoss(self)
-
-    def set_armor_loss(self):
-        """Enable ArmorPoseLoss with dual color/type classification branches."""
-        self.criterion = None  # force re-init
-        self.criterion = ArmorPoseLoss(self)  # type: ignore[assignment]
+            return E2ELoss(self, ArmorPoseLoss)
+        return ArmorPoseLoss(self)
 
 
 class ClassificationModel(BaseModel):

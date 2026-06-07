@@ -13,8 +13,6 @@ import argparse
 import sys
 from pathlib import Path
 
-import torch
-
 from ultralytics import YOLO
 
 # ── 配置 ────────────────────────────────────────────────────────────────
@@ -62,7 +60,6 @@ if __name__ == "__main__":
         m = unwrap_model(trainer.model)
         if not isinstance(m, ArmorPoseModel):
             m.__class__ = ArmorPoseModel
-        m.set_armor_loss()
         if "color_loss" not in trainer.loss_names:
             trainer.loss_names += ("color_loss", "type_loss")
         # 重置 validator.loss 使其重新初始化为正确尺寸
