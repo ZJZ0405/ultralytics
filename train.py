@@ -65,9 +65,9 @@ if __name__ == "__main__":
         m.set_armor_loss()
         if "color_loss" not in trainer.loss_names:
             trainer.loss_names += ("color_loss", "type_loss")
-        # 同步 validator 的 loss 张量，否则 size mismatch (7 vs 5)
+        # 重置 validator.loss 使其重新初始化为正确尺寸
         if hasattr(trainer, "validator") and trainer.validator is not None:
-            trainer.validator.loss = torch.zeros(len(trainer.loss_names))
+            trainer.validator.loss = None
 
     model.add_callback("on_pretrain_routine_end", _setup_armor)
 
