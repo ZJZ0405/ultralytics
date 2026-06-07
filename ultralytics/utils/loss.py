@@ -973,6 +973,106 @@ class PoseLoss26(v8PoseLoss):
         return kpts_loss, kpts_obj_loss, rle_loss
 
 
+class ArmorPoseLoss(v8PoseLoss):
+    """Criterion class for computing training losses for ArmorPose estimation.
+
+    Extends v8PoseLoss with additional armor attribute classification losses:
+    - color classification (4 classes: Red, Blue, None, Purple)
+    - armor type classification (9 classes: Hero, Engineer, ..., BigBase)
+
+    The total loss is: det_loss + pose_loss + color_cls_loss + type_cls_loss.
+    """
+
+    def __init__(self, model: torch.nn.Module, tal_topk: int = 10, tal_topk2: int = 10):
+        """Initialize ArmorPoseLoss with model parameters and attribute classification losses.
+
+        Args:
+            model (torch.nn.Module): The ArmorPose model (must be de-paralleled).
+            tal_topk (int): Top-k for task-aligned assigner.
+            tal_topk2 (int): Secondary top-k for task-aligned assigner.
+        """
+        super().__init__(model, tal_topk, tal_topk2)
+        head = model.model[-1]  # ArmorPose head
+        self.n_color = getattr(head, "n_color", 4)
+        self.n_type = getattr(head, "n_type", 9)
+        self.color_loss_fn = nn.CrossEntropyLoss(reduction="none")
+        self.type_loss_fn = nn.CrossEntropyLoss(reduction="none")
+
+    def loss(self, preds: dict[str, torch.Tensor], batch: dict[str, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
+        """Calculate the total loss including pose and armor attribute classification.
+
+        Args:
+            preds (dict): Predictions from ArmorPose head with keys:
+                - boxes, scores, feats, kpts (from Pose)
+                - armor_color: color classification logits (BS, n_color, N_anchors)
+                - armor_type: type classification logits (BS, n_type, N_anchors)
+            batch (dict): Ground truth batch with standard keys plus:
+                - armor_color: color labels (N_gts, 1)
+                - armor_type: type labels (N_gts, 1)
+
+        Returns:
+            (torch.Tensor): Total loss * batch_size.
+            (torch.Tensor): Detached loss items for logging.
+        """
+        # Standard pose loss (box, kpt_location, kpt_visibility, cls, dfl)
+        pred_kpts = preds["kpts"].permute(0, 2, 1).contiguous()
+        n_loss_items = 7  # box, kpt_loc, kpt_vis, cls, dfl, color, type
+        loss = torch.zeros(n_loss_items, device=self.device)
+
+        (fg_mask, target_gt_idx, target_bboxes, anchor_points, stride_tensor), det_loss, _ = (
+            self.get_assigned_targets_and_loss(preds, batch)
+        )
+        loss[0], _, loss[4] = det_loss[0], det_loss[1], det_loss[2]  # box, cls(suppressed), dfl
+        # cls_loss intentionally zeroed — color_head + type_head replace the 36-way classifier
+
+        batch_size = pred_kpts.shape[0]
+        imgsz = torch.tensor(preds["feats"][0].shape[2:], device=self.device, dtype=pred_kpts.dtype) * self.stride[0]
+
+        # Keypoint loss
+        pred_kpts = self.kpts_decode(anchor_points, pred_kpts.view(batch_size, -1, *self.kpt_shape))
+        if fg_mask.sum():
+            keypoints = batch["keypoints"].to(self.device).float().clone()
+            keypoints[..., 0] *= imgsz[1]
+            keypoints[..., 1] *= imgsz[0]
+            loss[1], loss[2] = self.calculate_keypoints_loss(
+                fg_mask, target_gt_idx, keypoints, batch["batch_idx"].view(-1, 1),
+                stride_tensor, target_bboxes, pred_kpts,
+            )
+
+        loss[1] *= self.hyp.pose  # pose gain
+        loss[2] *= self.hyp.kobj  # kobj gain
+
+        # --- Armor attribute classification losses ---
+        # Derive color/type targets from batch cls labels via TAL assignment index
+        if fg_mask.sum() and "armor_color" in preds and "armor_type" in preds:
+            # Map each anchor to its assigned GT's class via target_gt_idx
+            # batch["cls"]: (N_gts, 1) — original class labels from data
+            batch_cls = batch["cls"].to(self.device).long().squeeze(-1)  # (N_gts,)
+            target_cls = batch_cls[target_gt_idx]  # (BS, N_anchors) — class 0-35
+            target_color = target_cls % 4  # (BS, N_anchors) — color 0-3
+            target_type = target_cls // 4  # (BS, N_anchors) — type 0-8
+
+            # Color classification loss (only on fg anchors)
+            color_logits = preds["armor_color"].permute(0, 2, 1)  # (BS, N_anchors, n_color)
+            color_loss = self.color_loss_fn(
+                color_logits[fg_mask], target_color[fg_mask]
+            ).mean()
+
+            # Type classification loss (only on fg anchors)
+            type_logits = preds["armor_type"].permute(0, 2, 1)  # (BS, N_anchors, n_type)
+            type_loss = self.type_loss_fn(
+                type_logits[fg_mask], target_type[fg_mask]
+            ).mean()
+
+            loss[5] = color_loss
+            loss[6] = type_loss
+
+            loss[5] *= getattr(self.hyp, "color", 0.5)  # color loss gain
+            loss[6] *= getattr(self.hyp, "type", 0.5)  # type loss gain
+
+        return loss.sum() * batch_size, loss.detach()  # total loss, loss items
+
+
 class v8ClassificationLoss:
     """Criterion class for computing training losses for classification."""
 

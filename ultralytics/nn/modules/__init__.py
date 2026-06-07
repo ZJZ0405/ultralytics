@@ -77,6 +77,7 @@ from .conv import (
     SpatialAttention,
 )
 from .head import (
+    ArmorPose,
     OBB,
     OBB26,
     Classify,
@@ -109,6 +110,7 @@ from .transformer import (
 
 __all__ = (
     "AIFI",
+    "ArmorPose",
     "C1",
     "C2",
     "C2PSA",

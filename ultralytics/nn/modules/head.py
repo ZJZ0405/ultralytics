@@ -21,6 +21,7 @@ from .transformer import MLP, DeformableTransformerDecoder, DeformableTransforme
 from .utils import bias_init_with_prob, linear_init
 
 __all__ = (
+    "ArmorPose",
     "OBB",
     "Classify",
     "Detect",
@@ -661,6 +662,186 @@ class Pose(Detect):
             y[:, 0::ndim] = (y[:, 0::ndim] * 2.0 + (self.anchors[0] - 0.5)) * self.strides
             y[:, 1::ndim] = (y[:, 1::ndim] * 2.0 + (self.anchors[1] - 0.5)) * self.strides
             return y
+
+
+class ArmorPose(Pose):
+    """Armor Pose head for custom keypoint estimation with armor attribute classification.
+
+    This class extends the standard YOLO Pose head with additional classification branches
+    for armor color (4 classes) and armor type (9 classes). It is designed for the armor
+    plate detection + keypoint estimation task where each object has both pose keypoints
+    (4 lightbar corners) and attribute labels (color + type).
+
+    Output branches:
+        - cv2: box regression (inherited from Detect)
+        - cv3: class probability (inherited from Detect)
+        - cv4: keypoint prediction (inherited from Pose)
+        - color_head: armor color classification (4 classes: Red, Blue, None, Purple)
+        - type_head: armor type classification (9 classes: Hero, Engineer, ..., BigBase)
+
+    Customization hooks (override in subclass or modify directly):
+        - forward_head(): Customize how multi-scale features are processed.
+        - kpts_decode(): Customize keypoint coordinate decoding.
+        - _inference(): Customize inference-time output assembly.
+
+    Attributes:
+        kpt_shape (tuple): Number of keypoints and dimensions (2 for x,y or 3 for x,y,visible).
+        nk (int): Total number of keypoint values.
+        n_color (int): Number of color classes (default 4).
+        n_type (int): Number of armor type classes (default 9).
+        cv4 (nn.ModuleList): Convolution layers for keypoint prediction.
+        color_head (nn.ModuleList): Convolution layers for color classification.
+        type_head (nn.ModuleList): Convolution layers for armor type classification.
+
+    Methods:
+        forward: Perform forward pass and return predictions.
+        forward_head: Return predictions from all head branches.
+        kpts_decode: Decode keypoints from predictions.
+
+    Examples:
+        Create an Armor pose detection head with 36 composite classes
+        >>> armor_pose = ArmorPose(nc=36, kpt_shape=(4, 3), ch=(256, 512, 1024))
+        >>> x = [torch.randn(1, 256, 80, 80), torch.randn(1, 512, 40, 40), torch.randn(1, 1024, 20, 20)]
+        >>> outputs = armor_pose(x)
+    """
+
+    def __init__(self, nc=36, kpt_shape=(4, 3), reg_max=16, end2end=False, ch=()):
+        """Initialize ArmorPose head with keypoint and attribute classification branches.
+
+        Args:
+            nc (int): Number of composite classes (default 36 = 9 types × 4 colors).
+            kpt_shape (tuple): Number of keypoints, number of dims (2 for x,y or 3 for x,y,visible).
+            reg_max (int): Maximum number of DFL channels.
+            end2end (bool): Whether to use end-to-end NMS-free detection.
+            ch (tuple): Tuple of channel sizes from backbone feature maps, e.g. (256, 512, 1024).
+        """
+        super().__init__(nc, kpt_shape, reg_max, end2end, ch)
+
+        # Armor classification branches (4 colors × 9 armor types)
+        self.n_color = 4  # Red, Blue, None, Purple
+        self.n_type = 9  # Hero, Engineer, Three, Four, Five, Outpost, Sentry, SmallBase, BigBase
+
+        c_cls = max(ch[0] // 4, max(self.n_color, self.n_type))
+        self.color_head = nn.ModuleList(
+            nn.Sequential(Conv(x, c_cls, 3), Conv(c_cls, c_cls, 3), nn.Conv2d(c_cls, self.n_color, 1)) for x in ch
+        )
+        self.type_head = nn.ModuleList(
+            nn.Sequential(Conv(x, c_cls, 3), Conv(c_cls, c_cls, 3), nn.Conv2d(c_cls, self.n_type, 1)) for x in ch
+        )
+
+        if end2end:
+            self.one2one_color_head = copy.deepcopy(self.color_head)
+            self.one2one_type_head = copy.deepcopy(self.type_head)
+
+    @property
+    def one2many(self):
+        """Returns the one-to-many head components including armor classification."""
+        return dict(
+            box_head=self.cv2,
+            cls_head=self.cv3,
+            pose_head=self.cv4,
+            color_head=self.color_head,
+            type_head=self.type_head,
+        )
+
+    @property
+    def one2one(self):
+        """Returns the one-to-one head components including armor classification."""
+        return dict(
+            box_head=self.one2one_cv2,
+            cls_head=self.one2one_cv3,
+            pose_head=self.one2one_cv4,
+            color_head=self.one2one_color_head,
+            type_head=self.one2one_type_head,
+        )
+
+    def forward_head(
+        self,
+        x: list[torch.Tensor],
+        box_head: torch.nn.Module,
+        cls_head: torch.nn.Module,
+        pose_head: torch.nn.Module,
+        color_head: torch.nn.Module = None,
+        type_head: torch.nn.Module = None,
+    ) -> dict[str, torch.Tensor]:
+        """Concatenates and returns predicted bounding boxes, class probabilities, keypoints, and armor attributes.
+
+        Args:
+            x (list[torch.Tensor]): Multi-scale feature maps from backbone/neck.
+            box_head (nn.Module): Box regression head branches.
+            cls_head (nn.Module): Class probability head branches.
+            pose_head (nn.Module): Keypoint prediction head branches.
+            color_head (nn.Module, optional): Armor color classification head branches.
+            type_head (nn.Module, optional): Armor type classification head branches.
+
+        Returns:
+            (dict[str, torch.Tensor]): Predictions dict with keys:
+                - boxes: bounding box regression
+                - scores: class scores
+                - feats: feature maps (for anchor generation)
+                - kpts: keypoint predictions
+                - armor_color: color classification logits
+                - armor_type: type classification logits
+        """
+        preds = Detect.forward_head(self, x, box_head, cls_head)
+        bs = x[0].shape[0]  # batch size
+
+        if pose_head is not None:
+            preds["kpts"] = torch.cat([pose_head[i](x[i]).view(bs, self.nk, -1) for i in range(self.nl)], 2)
+
+        if color_head is not None:
+            preds["armor_color"] = torch.cat(
+                [color_head[i](x[i]).view(bs, self.n_color, -1) for i in range(self.nl)], 2
+            )
+
+        if type_head is not None:
+            preds["armor_type"] = torch.cat(
+                [type_head[i](x[i]).view(bs, self.n_type, -1) for i in range(self.nl)], 2
+            )
+
+        return preds
+
+    def _inference(self, x: dict[str, torch.Tensor]) -> torch.Tensor:
+        """Decode boxes, scores, keypoints, and armor attributes for inference.
+
+        Outputs standard Pose format (boxes + 36-way scores + kpts) with
+        color_id and type_id appended as extra columns, so the validator's
+        NMS can use the standard class scores for filtering.
+        """
+        preds = super()._inference(x)  # (BS, 4+nk+nc, N_anchors) standard pose
+        if x.get("armor_color") is not None and x.get("armor_type") is not None:
+            color_cls = x["armor_color"].argmax(1, keepdim=True).float()
+            type_cls = x["armor_type"].argmax(1, keepdim=True).float()
+            return torch.cat([preds, color_cls, type_cls], dim=1)
+        return preds
+
+    def postprocess(self, preds: torch.Tensor) -> torch.Tensor:
+        """Post-process predictions, preserving armor color/type attributes.
+
+        Extends the standard Pose postprocess to carry color_id and type_id
+        through NMS alongside the keypoints.
+        """
+        nc_last = preds.shape[-1]
+        expected = 4 + self.nc + self.nk + 2  # boxes(4) + scores(36) + kpts(nk) + color(1) + type(1)
+        if nc_last == expected:
+            # Split into standard parts + armor attributes
+            boxes, scores, kpts, color_cls, type_cls = preds.split(
+                [4, self.nc, self.nk, 1, 1], dim=-1
+            )
+            # Standard NMS on the 36-way scores
+            scores, conf, idx = self.get_topk_index(scores, self.max_det)
+            boxes = boxes.gather(dim=1, index=idx.repeat(1, 1, 4))
+            kpts = kpts.gather(dim=1, index=idx.repeat(1, 1, self.nk))
+            color_cls = color_cls.gather(dim=1, index=idx.repeat(1, 1, 1))
+            type_cls = type_cls.gather(dim=1, index=idx.repeat(1, 1, 1))
+            return torch.cat([boxes, scores, conf, kpts, color_cls, type_cls], dim=-1)
+        # Fallback to standard Pose postprocess
+        return super().postprocess(preds)
+
+    def fuse(self) -> None:
+        """Remove the one2many head for inference optimization."""
+        super().fuse()
+        self.color_head = self.type_head = None
 
 
 class Pose26(Pose):

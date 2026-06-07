@@ -1,0 +1,58 @@
+# Ultralytics 🚀 AGPL-3.0 License - https://ultralytics.com/license
+
+# Armor keypoint detection dataset
+# Each armor object has 4 keypoints (lightbar corners: left-bottom, left-top, right-top, right-bottom)
+# and 2 attribute labels (color, armor type) stored as extra columns in YOLO label files.
+#
+# YOLO label format (19 columns):
+#   <class_id> <cx> <cy> <w> <h> <kx1> <ky1> <v1> ... <kx4> <ky4> <v4> <color_str> <type_str>
+#
+# Example usage: yolo task=armor-pose mode=train model=armor-pose.yaml data=armor.yaml
+
+# Dataset paths
+path: ../datasets/armor # dataset root dir
+train: images/train # train images (relative to 'path')
+val: images/val # val images (relative to 'path')
+test: # test images (optional)
+
+# Keypoints
+kpt_shape: [4, 3] # number of keypoints, number of dims (2 for x,y or 3 for x,y,visible)
+
+# Classes (36 = 9 armor types × 4 colors, ordered by type then color)
+names:
+  0: Hero_Red
+  1: Hero_Blue
+  2: Hero_None
+  3: Hero_Purple
+  4: Engineer_Red
+  5: Engineer_Blue
+  6: Engineer_None
+  7: Engineer_Purple
+  8: Three_Red
+  9: Three_Blue
+  10: Three_None
+  11: Three_Purple
+  12: Four_Red
+  13: Four_Blue
+  14: Four_None
+  15: Four_Purple
+  16: Five_Red
+  17: Five_Blue
+  18: Five_None
+  19: Five_Purple
+  20: Outpost_Red
+  21: Outpost_Blue
+  22: Outpost_None
+  23: Outpost_Purple
+  24: Sentry_Red
+  25: Sentry_Blue
+  26: Sentry_None
+  27: Sentry_Purple
+  28: SmallBase_Red
+  29: SmallBase_Blue
+  30: SmallBase_None
+  31: SmallBase_Purple
+  32: BigBase_Red
+  33: BigBase_Blue
+  34: BigBase_None
+  35: BigBase_Purple

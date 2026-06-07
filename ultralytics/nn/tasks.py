@@ -28,6 +28,7 @@ from ultralytics.nn.modules import (
     A2C2f,
     AConv,
     ADown,
+    ArmorPose,
     Bottleneck,
     BottleneckCSP,
     C2f,
@@ -77,6 +78,7 @@ from ultralytics.nn.modules import (
 from ultralytics.utils import DEFAULT_CFG_DICT, LOGGER, SETTINGS, WINDOWS, YAML, colorstr, emojis
 from ultralytics.utils.checks import REMOTE_FILE_PREFIXES, check_file, check_requirements, check_suffix, check_yaml
 from ultralytics.utils.loss import (
+    ArmorPoseLoss,
     E2ELoss,
     PoseLoss26,
     SemanticSegmentationLoss,
@@ -695,6 +697,60 @@ class PoseModel(DetectionModel):
     def init_criterion(self):
         """Initialize the loss criterion for the PoseModel."""
         return E2ELoss(self, PoseLoss26) if getattr(self, "end2end", False) else v8PoseLoss(self)
+
+
+class ArmorPoseModel(PoseModel):
+    """Armor Pose model for custom keypoint estimation.
+
+    This class extends PoseModel to provide a clean, customizable template for pose estimation tasks.
+    Override init_criterion() to use a custom loss function, or override other methods for custom
+    training/inference behavior.
+
+    Attributes:
+        kpt_shape (tuple): Shape of keypoints data (num_keypoints, num_dimensions).
+
+    Methods:
+        __init__: Initialize the Armor pose model with default armor-pose.yaml config.
+        init_criterion: Initialize the loss criterion for pose estimation.
+
+    Examples:
+        Initialize an armor pose model from the default config
+        >>> model = ArmorPoseModel("armor-pose.yaml", ch=3, nc=1, data_kpt_shape=(17, 3))
+
+        Initialize from a custom config
+        >>> model = ArmorPoseModel("path/to/custom-armor.yaml", ch=3, nc=1)
+    """
+
+    def __init__(self, cfg="armor-pose.yaml", ch=3, nc=None, data_kpt_shape=(None, None), verbose=True):
+        """Initialize ArmorPose model with config and optional keypoint shape override.
+
+        Args:
+            cfg (str | dict): Model configuration file path or dictionary. Defaults to 'armor-pose.yaml'.
+            ch (int): Number of input channels.
+            nc (int, optional): Number of classes. If None, uses the value from the config file.
+            data_kpt_shape (tuple): Shape of keypoints data (num_keypoints, num_dimensions). If provided
+                and differs from config, overrides the config value.
+            verbose (bool): Whether to display model information on load.
+        """
+        super().__init__(cfg=cfg, ch=ch, nc=nc, data_kpt_shape=data_kpt_shape, verbose=verbose)
+
+    def init_criterion(self):
+        """Initialize the loss criterion for ArmorPose.
+
+        Falls back to v8PoseLoss by default (compatible with standard pose task).
+        Call model.set_armor_loss() to enable armor-specific color/type losses.
+
+        Returns:
+            (v8PoseLoss | E2ELoss): The loss criterion.
+        """
+        if getattr(self, "end2end", False):
+            return E2ELoss(self, PoseLoss26)
+        return v8PoseLoss(self)
+
+    def set_armor_loss(self):
+        """Enable ArmorPoseLoss with dual color/type classification branches."""
+        self.criterion = None  # force re-init
+        self.criterion = ArmorPoseLoss(self)  # type: ignore[assignment]
 
 
 class ClassificationModel(BaseModel):
@@ -1780,6 +1836,7 @@ def parse_model(d, ch, verbose=True):
             c2 = sum(ch[x] for x in f)
         elif m in frozenset(
             {
+                ArmorPose,
                 Detect,
                 WorldDetect,
                 YOLOEDetect,
@@ -1796,7 +1853,7 @@ def parse_model(d, ch, verbose=True):
             args.extend([reg_max, end2end, [ch[x] for x in f]])
             if m is Segment or m is YOLOESegment or m is Segment26 or m is YOLOESegment26:
                 args[2] = make_divisible(min(args[2], max_channels) * width, 8)
-            if m in {Detect, YOLOEDetect, Segment, Segment26, YOLOESegment, YOLOESegment26, Pose, Pose26, OBB, OBB26}:
+            if m in {ArmorPose, Detect, YOLOEDetect, Segment, Segment26, YOLOESegment, YOLOESegment26, Pose, Pose26, OBB, OBB26}:
                 m.legacy = legacy
         elif m is SemanticSegment:
             args.append([ch[x] for x in f])  # nc, ch tuple

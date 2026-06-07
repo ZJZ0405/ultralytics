@@ -1,0 +1,50 @@
+# Ultralytics 🚀 AGPL-3.0 License - https://ultralytics.com/license
+
+# Armor custom keypoints/pose estimation model with P3/8 - P5/32 outputs
+# This is a custom pose estimation head template based on YOLOv8 architecture.
+# The ArmorPose head provides a clean extension point for custom keypoint detection logic.
+
+# Parameters
+nc: 36 # number of classes (9 armor types × 4 colors)
+kpt_shape: [4, 3] # number of keypoints, number of dims (2 for x,y or 3 for x,y,visible)
+scales: # model compound scaling constants, i.e. 'model=armor-pose.yaml' with scale 'n'
+  # [depth, width, max_channels]
+  n: [0.33, 0.25, 1024] # Armor-n summary: 129 layers, 3,263,696 parameters, 3,263,680 gradients, 9.2 GFLOPS
+  s: [0.33, 0.50, 1024] # Armor-s summary: 129 layers, 11,552,720 parameters, 11,552,704 gradients, 29.7 GFLOPS
+  m: [0.67, 0.75, 768] # Armor-m summary: 169 layers, 26,790,640 parameters, 26,790,624 gradients, 81.6 GFLOPS
+  l: [1.00, 1.00, 512] # Armor-l summary: 209 layers, 44,659,200 parameters, 44,659,184 gradients, 169.4 GFLOPS
+  x: [1.00, 1.25, 512] # Armor-x summary: 209 layers, 69,764,688 parameters, 69,764,672 gradients, 263.8 GFLOPS
+
+# Armor backbone (YOLOv8-style)
+backbone:
+  # [from, repeats, module, args]
+  - [-1, 1, Conv, [64, 3, 2]] # 0-P1/2
+  - [-1, 1, Conv, [128, 3, 2]] # 1-P2/4
+  - [-1, 3, C2f, [128, True]]
+  - [-1, 1, Conv, [256, 3, 2]] # 3-P3/8
+  - [-1, 6, C2f, [256, True]]
+  - [-1, 1, Conv, [512, 3, 2]] # 5-P4/16
+  - [-1, 6, C2f, [512, True]]
+  - [-1, 1, Conv, [1024, 3, 2]] # 7-P5/32
+  - [-1, 3, C2f, [1024, True]]
+  - [-1, 1, SPPF, [1024, 5]] # 9
+
+# Armor head (YOLOv8-style with custom ArmorPose head)
+head:
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]]
+  - [[-1, 6], 1, Concat, [1]] # cat backbone P4
+  - [-1, 3, C2f, [512]] # 12
+
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]]
+  - [[-1, 4], 1, Concat, [1]] # cat backbone P3
+  - [-1, 3, C2f, [256]] # 15 (P3/8-small)
+
+  - [-1, 1, Conv, [256, 3, 2]]
+  - [[-1, 12], 1, Concat, [1]] # cat head P4
+  - [-1, 3, C2f, [512]] # 18 (P4/16-medium)
+
+  - [-1, 1, Conv, [512, 3, 2]]
+  - [[-1, 9], 1, Concat, [1]] # cat head P5
+  - [-1, 3, C2f, [1024]] # 21 (P5/32-large)
+
+  - [[15, 18, 21], 1, ArmorPose, [nc, kpt_shape]] # ArmorPose(P3, P4, P5)
