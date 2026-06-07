@@ -13,6 +13,8 @@ import argparse
 import sys
 from pathlib import Path
 
+import torch
+
 from ultralytics import YOLO
 
 # ── 配置 ────────────────────────────────────────────────────────────────
@@ -63,6 +65,9 @@ if __name__ == "__main__":
         m.set_armor_loss()
         if "color_loss" not in trainer.loss_names:
             trainer.loss_names += ("color_loss", "type_loss")
+        # 同步 validator 的 loss 张量，否则 size mismatch (7 vs 5)
+        if hasattr(trainer, "validator") and trainer.validator is not None:
+            trainer.validator.loss = torch.zeros(len(trainer.loss_names))
 
     model.add_callback("on_pretrain_routine_end", _setup_armor)
 
