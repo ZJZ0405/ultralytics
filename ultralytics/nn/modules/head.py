@@ -764,40 +764,30 @@ class ArmorPose(Pose):
         color_head: torch.nn.Module = None,
         type_head: torch.nn.Module = None,
     ) -> dict[str, torch.Tensor]:
-        """Concatenates and returns predicted bounding boxes, class probabilities, keypoints, and armor attributes.
+        """Return predictions from multi-scale features through all head branches.
 
-        Args:
-            x (list[torch.Tensor]): Multi-scale feature maps from backbone/neck.
-            box_head (nn.Module): Box regression head branches.
-            cls_head (nn.Module): Class probability head branches.
-            pose_head (nn.Module): Keypoint prediction head branches.
-            color_head (nn.Module, optional): Armor color classification head branches.
-            type_head (nn.Module, optional): Armor type classification head branches.
-
-        Returns:
-            (dict[str, torch.Tensor]): Predictions dict with keys:
-                - boxes: bounding box regression
-                - scores: class scores
-                - feats: feature maps (for anchor generation)
-                - kpts: keypoint predictions
-                - armor_color: color classification logits
-                - armor_type: type classification logits
+        When color_head + type_head are both present, the 36-way class scores are
+        derived from their outer sum (color_logit[c] + type_logit[t]), replacing
+        the standard cv3 classifier.  This makes color/type heads the primary
+        classification path, at the same level as cv3.
         """
-        preds = Detect.forward_head(self, x, box_head, cls_head)
         bs = x[0].shape[0]  # batch size
+
+        if color_head is not None and type_head is not None:
+            # Get boxes + feats from standard head (without scores)
+            preds = Detect.forward_head(self, x, box_head, cls_head)
+            # Build 36-way scores from color × type logits via outer sum
+            c_logits = torch.cat([color_head[i](x[i]).view(bs, self.n_color, -1) for i in range(self.nl)], 2)
+            t_logits = torch.cat([type_head[i](x[i]).view(bs, self.n_type, -1) for i in range(self.nl)], 2)
+            preds["armor_color"] = c_logits
+            preds["armor_type"] = t_logits
+            # Replace cv3 scores: score[color, type] = c_logit[c] + t_logit[t]
+            preds["scores"] = (c_logits.unsqueeze(2) + t_logits.unsqueeze(1)).view(bs, self.nc, -1)
+        else:
+            preds = Detect.forward_head(self, x, box_head, cls_head)
 
         if pose_head is not None:
             preds["kpts"] = torch.cat([pose_head[i](x[i]).view(bs, self.nk, -1) for i in range(self.nl)], 2)
-
-        if color_head is not None:
-            preds["armor_color"] = torch.cat(
-                [color_head[i](x[i]).view(bs, self.n_color, -1) for i in range(self.nl)], 2
-            )
-
-        if type_head is not None:
-            preds["armor_type"] = torch.cat(
-                [type_head[i](x[i]).view(bs, self.n_type, -1) for i in range(self.nl)], 2
-            )
 
         return preds
 
