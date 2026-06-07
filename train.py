@@ -64,7 +64,7 @@ if __name__ == "__main__":
         if "color_loss" not in trainer.loss_names:
             trainer.loss_names += ("color_loss", "type_loss")
 
-    model.add_callback("on_pretrain_routine_start", _setup_armor)
+    model.add_callback("on_pretrain_routine_end", _setup_armor)
 
     model.train(
         data=str(DATA_YAML),
