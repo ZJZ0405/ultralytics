@@ -89,4 +89,9 @@ if __name__ == "__main__":
         translate=0.2,
         perspective=0.001,
         fliplr=0.5,
+        # loss 增益
+        pose=30.0,  # 关键点回归（默认12.0，提高以强化pose精度）
+        kobj=3.0,   # 关键点可见性（默认1.0）
+        color=1.0,  # 颜色分类（默认0.5）
+        type=1.0,   # 装甲类型分类（默认0.5）
     )
